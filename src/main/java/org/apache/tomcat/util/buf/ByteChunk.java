@@ -324,6 +324,7 @@ public final class ByteChunk extends AbstractChunk {
     // -------------------- Removing data from the buffer --------------------
 
     public int substract() throws IOException {
+        //fixme 这里检查eof同时数据不够的时候,会去buffer里面读
         if (checkEof()) {
             return -1;
         }

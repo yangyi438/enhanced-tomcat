@@ -190,6 +190,12 @@ public abstract class AbstractInputBuffer<S> implements InputBuffer{
 
     public abstract boolean parseHeaders() throws IOException;
 
+    //非阻塞的最多读取一定的字节数组, 返回读取的字节,默认为-2,代表不支持这个操作,子类未重写
+    //返回0代表没有读取到数据,返回-1 则代表eof
+    protected int noBlockingMaxRead(int maxRead) throws IOException {
+        return -2;
+    }
+
     /**
      * Attempts to read some data into the input buffer.
      *

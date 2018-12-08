@@ -16,12 +16,16 @@
  */
 package org.apache.coyote.http11;
 
+import java.io.EOFException;
 import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.channels.Selector;
 import java.nio.charset.StandardCharsets;
 
 import org.apache.coyote.Request;
 import org.apache.tomcat.util.buf.MessageBytes;
 import org.apache.tomcat.util.http.parser.HttpParser;
+import org.apache.tomcat.util.net.NioEndpoint;
 
 public abstract class AbstractNioInputBuffer<S> extends AbstractInputBuffer<S> {
 
@@ -194,6 +198,7 @@ public abstract class AbstractNioInputBuffer<S> extends AbstractInputBuffer<S> {
                     if (!fill(false)) {
                         // A read is pending, so no longer in initial state
                         parsingRequestLinePhase = 1;
+                        //fixme 改变状态,并且没有读完所有requestLine行,而且没有读到数据了
                         return false;
                     }
                 }
@@ -237,6 +242,7 @@ public abstract class AbstractNioInputBuffer<S> extends AbstractInputBuffer<S> {
                 }
                 pos++;
             }
+            //fixme 读取完http的method了
             parsingRequestLinePhase = 3;
         }
         if ( parsingRequestLinePhase == 3 ) {
@@ -257,6 +263,7 @@ public abstract class AbstractNioInputBuffer<S> extends AbstractInputBuffer<S> {
             parsingRequestLineStart = pos;
             parsingRequestLinePhase = 4;
         }
+        //一行已经读完毕了
         if (parsingRequestLinePhase == 4) {
             // Mark the current buffer position
 
@@ -371,7 +378,12 @@ public abstract class AbstractNioInputBuffer<S> extends AbstractInputBuffer<S> {
             getLog().warn("Expanding buffer size. Old size: " + buf.length
                     + ", new size: " + newsize, new Exception());
             byte[] tmp = new byte[newsize];
+            //FIXME 这里我们可以使用内存池,可以泄露的内存池
             System.arraycopy(buf,0,tmp,0,buf.length);
+            //FIXME 这里我们可以使用内存池,可以泄露的内存池
+            //FIXME 扩充的时候,不能直接丢弃老的数组,使用直接内存代替老的数组,池化资源
+            // 同时我们要注意,老的byteBuffer是否有被byteChunk标记了,不然release会出现问题,放入缓存池之后被其他的请求使用
+            //改造我们的缓存池,增加可以泄露的功能
             buf = tmp;
         }
     }

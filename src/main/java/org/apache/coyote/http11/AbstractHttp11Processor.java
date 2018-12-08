@@ -16,6 +16,7 @@
  */
 package org.apache.coyote.http11;
 
+import java.io.EOFException;
 import java.io.IOException;
 import java.io.InterruptedIOException;
 import java.nio.ByteBuffer;
@@ -91,6 +92,76 @@ public abstract class AbstractHttp11Processor<S> extends AbstractProcessor<S> {
      */
     protected volatile boolean keepAlive = true;
 
+
+    /**
+     * 在无堵塞的情况下,尽可能的读取http协议的body的部分甚至全部
+     * 最多读取我们inputBuffer数组剩下的大小的数据,,content-length中最大的一个数据,
+     * 可以避免tcp的慢启动造成的前期读阻塞造成的影响,也可以减少,线程在后续读取body的时候阻塞的次数
+     * 大多的数量少的body,又不是trunk输入的,会享受一次无堵塞的读取body
+     */
+    protected boolean readingMoreBody = false;
+    protected boolean inParseHeader = false;
+    protected boolean isNotTransferEncoding = false;
+    /**
+     *
+     * @return true 代表要继续的读body,否则代表不需要继续读body了
+     * @throws IOException
+     */
+    protected boolean readMoreBody() throws IOException {
+        assert !inParseHeader;
+        int contentLength = request.getContentLength();
+        //>0就绝对不是chunk输出的吗?待考证,或许放大prepareRequest后面执行比较好
+        //增加一个判断,确定有没有("transfer-encoding")的header,有就跳过
+        if (contentLength <= 0) {
+            //不再继续读取body了
+            return false;
+        }
+        if (!isNotTransferEncoding) {
+            MessageBytes value = request.getMimeHeaders().getValue("transfer-encoding");
+            if (value == null) {
+                isNotTransferEncoding = true;
+            } else {
+                return false;
+            }
+        }
+        int length = inputBuffer.buf.length;
+        int localLastValid = inputBuffer.lastValid;
+        int bodyAlreadyRead = inputBuffer.lastValid - inputBuffer.end;
+        if (bodyAlreadyRead>= contentLength) {
+            //body 已经读取完毕了,不继续读了
+            return false;
+        }
+        int surplus = length - localLastValid;
+        if (surplus <= 0) {
+            //数组中没有剩余的位置了,那就不继续读body了
+            return false;
+        }
+        int hopeRead = contentLength - bodyAlreadyRead;
+        int maxRead = Math.min(hopeRead, surplus);
+        int realRead = inputBuffer.noBlockingMaxRead(maxRead);
+        //不支持预读body eof会抛出异常,tomcat是这样处理的
+        if (realRead == -2 ) {
+            return false;
+        }
+        if (realRead == -1 ) {
+            //-1 和tomcat一样做成eof异常
+            throw new EOFException(sm.getString("iib.eof.error"));
+        }
+        bodyAlreadyRead = inputBuffer.lastValid - inputBuffer.end;
+        if (bodyAlreadyRead >= contentLength) {
+            //读完body了
+            return false;
+        }
+        if (inputBuffer.lastValid >= length) {
+            //数组位置已经满了
+            return false;
+        }
+        if (realRead == 0) {
+            return true;
+        }
+        //递归再读
+        return readMoreBody();
+    }
 
     /**
      * Flag used to indicate that the socket should be kept open (e.g. for keep
@@ -1060,14 +1131,18 @@ public abstract class AbstractHttp11Processor<S> extends AbstractProcessor<S> {
 
             // Parsing the request header
             try {
-                setRequestLineReadTimeout();
-
-                if (!getInputBuffer().parseRequestLine(keptAlive)) {
-                    if (handleIncompleteRequestLineRead()) {
-                        break;
+                if (!readingMoreBody) {
+                    //如果正在处于尝试读取更多的body的时候,跳过这些步骤
+                    setRequestLineReadTimeout();
+                    if (!getInputBuffer().parseRequestLine(keptAlive)) {
+                        if (handleIncompleteRequestLineRead()) {
+                            break;
+                        }
+                    } else {
+                        //将要读取http的header了
+                        inParseHeader = true;
                     }
                 }
-
                 if (endpoint.isPaused()) {
                     // 503 - Service unavailable
                     response.setStatus(503);
@@ -1075,19 +1150,38 @@ public abstract class AbstractHttp11Processor<S> extends AbstractProcessor<S> {
                 } else {
                     keptAlive = true;
                     // Set this every time in case limit has been changed via JMX
+                    //FIXME 有可能去掉JMX修改下面的参数
                     request.getMimeHeaders().setLimit(endpoint.getMaxHeaderCount());
                     request.getCookies().setLimit(getMaxCookieCount());
                     // Currently only NIO will ever return false here
-                    if (!getInputBuffer().parseHeaders()) {
-                        // We've read part of the request, don't recycle it
-                        // instead associate it with the socket
-                        openSocket = true;
-                        readComplete = false;
-                        break;
+                    if (inParseHeader) {
+                        if (!getInputBuffer().parseHeaders()) {
+                            // We've read part of the request, don't recycle it
+                            // instead associate it with the socket
+                            openSocket = true;
+                            readComplete = false;
+                            inParseHeader = true;
+                            break;
+                        } else {
+                            inParseHeader = false;
+                            readingMoreBody = true;
+                        }
                     }
-                    if (!disableUploadTimeout) {
-                        setSocketTimeout(connectionUploadTimeout);
+                    if(readingMoreBody) {
+                        //继续尝试读一部分的http的 body
+                        boolean continueRead = readMoreBody();
+                        if (continueRead) {
+                            openSocket = true;
+                            readComplete = false;
+                            break;
+                        } else {
+                            readingMoreBody = false;
+                        }
                     }
+
+                        if (!disableUploadTimeout) {
+                            setSocketTimeout(connectionUploadTimeout);
+                        }
                 }
             } catch (IOException e) {
                 if (getLog().isDebugEnabled()) {
@@ -1149,6 +1243,7 @@ public abstract class AbstractHttp11Processor<S> extends AbstractProcessor<S> {
             if (!getErrorState().isError()) {
                 try {
                     rp.setStage(org.apache.coyote.Constants.STAGE_SERVICE);
+                    //将要执行到servlet的业务方法了.有且只有这里是提供执行的方法,这里是唯一的入口
                     getAdapter().service(request, response);
                     // Handle when the response was committed before a serious
                     // error occurred.  Throwing a ServletException should both
@@ -1199,6 +1294,7 @@ public abstract class AbstractHttp11Processor<S> extends AbstractProcessor<S> {
                     // to be closed occurred.
                     checkExpectationAndResponseStatus();
                 }
+                //keepalive的情况可能读完所有的请求
                 endRequest();
             }
 
@@ -1249,6 +1345,7 @@ public abstract class AbstractHttp11Processor<S> extends AbstractProcessor<S> {
                     if (readComplete) {
                         return SocketState.OPEN;
                     } else {
+                        //请求的的requestLine或者requestHeader没有读完,
                         return SocketState.LONG;
                     }
                 } else {
@@ -1323,6 +1420,7 @@ public abstract class AbstractHttp11Processor<S> extends AbstractProcessor<S> {
         MimeHeaders headers = request.getMimeHeaders();
 
         // Check connection header
+        //fixme 这里可以读取head的值
         MessageBytes connectionValueMB = headers.getValue(Constants.CONNECTION);
         if (connectionValueMB != null) {
             ByteChunk connectionValueBC = connectionValueMB.getByteChunk();
@@ -1931,6 +2029,10 @@ public abstract class AbstractHttp11Processor<S> extends AbstractProcessor<S> {
 
     @Override
     public final void recycle(boolean isSocketClosing) {
+        //防止污染到下一次使用
+        readingMoreBody = false;
+        inParseHeader = false;
+        isNotTransferEncoding = false;
         getAdapter().checkRecycled(request, response);
 
         if (getInputBuffer() != null) {

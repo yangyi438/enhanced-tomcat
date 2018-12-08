@@ -545,6 +545,7 @@ public class NioEndpoint extends AbstractEndpoint<NioChannel> {
             NioChannel channel = nioChannels.pop();
             if ( channel == null ) {
                 // SSL setup
+                //fixme todo 优化,这里要采用缓存池,最好是直接内存的缓存池,可以泄露的内存池
                 if (sslContext != null) {
                     SSLEngine engine = createSSLEngine();
                     int appbufsize = engine.getSession().getApplicationBufferSize();
@@ -1101,7 +1102,9 @@ public class NioEndpoint extends AbstractEndpoint<NioChannel> {
                 } catch (OutOfMemoryError oom) {
                     try {
                         oomParachuteData = null;
+                        //fixme 我们的缓存池最好在oom的时候,也有释放的功能
                         releaseCaches();
+                        //fixme 我们的缓存池最好在oom的时候,也有释放的功能
                         log.error("", oom);
                     }catch ( Throwable oomt ) {
                         try {
@@ -1536,6 +1539,7 @@ public class NioEndpoint extends AbstractEndpoint<NioChannel> {
                     if (status == null) {
                         state = handler.process(ka, SocketStatus.OPEN_READ);
                     } else {
+                        //接受连接之后就处理读事件
                         state = handler.process(ka, status);
                     }
                     if (state == SocketState.CLOSED) {
@@ -1544,6 +1548,7 @@ public class NioEndpoint extends AbstractEndpoint<NioChannel> {
                 } else if (handshake == -1 ) {
                     close(socket, key, SocketStatus.DISCONNECT);
                 } else {
+                    //fixme poller来处理socket的读写事件,
                     ka.getPoller().add(socket,handshake);
                 }
             } catch (CancelledKeyException cx) {

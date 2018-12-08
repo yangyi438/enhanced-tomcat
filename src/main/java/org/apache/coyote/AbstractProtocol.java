@@ -606,7 +606,7 @@ public abstract class AbstractProtocol<S> implements ProtocolHandler,
             recycledProcessors.clear();
         }
 
-
+        //fixme 这里是处理读写事件,我要将要在这里修改,增加before-read的功能
         public SocketState process(SocketWrapper<S> wrapper,
                 SocketStatus status) {
             if (wrapper == null) {

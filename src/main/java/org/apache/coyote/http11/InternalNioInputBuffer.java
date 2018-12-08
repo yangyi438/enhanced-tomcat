@@ -105,7 +105,28 @@ public class InternalNioInputBuffer extends AbstractNioInputBuffer<NioChannel> {
         pool = ((NioEndpoint)endpoint).getSelectorPool();
     }
 
+    //实现父类,就不能返回-2了
+    protected int noBlockingMaxRead(int maxRead) throws IOException {
+        assert !parsingHeader;
+        int nRead = 0;
+        ByteBuffer readBuffer = socket.getBufHandler().getReadBuffer();
+        readBuffer.clear();
+        int capacity = readBuffer.capacity();
+        readBuffer.limit(Math.min(capacity, maxRead));
+        nRead = socket.read(readBuffer);
+        if (nRead > 0) {
+            readBuffer.flip();
+            readBuffer.limit(nRead);
+            readBuffer.get(buf, pos, nRead);
+            lastValid = lastValid + nRead;
+        } else if (nRead == -1) {
+            return -1;
+        }
+        return nRead ;
+    }
 
+
+    //fixme 使用直接内存池以后要优化,控制一次读的数据的大小
     @Override
     protected boolean fill(boolean block) throws IOException, EOFException {
         if (parsingHeader) {
@@ -117,8 +138,10 @@ public class InternalNioInputBuffer extends AbstractNioInputBuffer<NioChannel> {
             lastValid = pos = end;
         }
         int nRead = 0;
+        //fixme 使用直接内存池以后要优化,控制一次读的数据的大小
         ByteBuffer readBuffer = socket.getBufHandler().getReadBuffer();
         readBuffer.clear();
+        //fixme 不应该存在block的情况,直接干掉这种情况
         if ( block ) {
             Selector selector = null;
             try {
@@ -148,6 +171,7 @@ public class InternalNioInputBuffer extends AbstractNioInputBuffer<NioChannel> {
             expand(nRead + pos);
             readBuffer.get(buf, pos, nRead);
             lastValid = pos + nRead;
+            //fixme <= 0 ?
         } else if (nRead == -1) {
             //return false;
             throw new EOFException(sm.getString("iib.eof.error"));
